@@ -1,0 +1,23 @@
+[project]
+name = "layout-police"
+version = "0.1.0"
+description = "スライド・ポスター・文書の、ほぼ揃っているが揃っていない見た目のずれを検出する"
+requires-python = ">=3.10"
+license = {text = "AGPL-3.0-or-later"}
+readme = "README.md"
+dependencies = ["pymupdf>=1.24", "numpy", "pillow", "mcp"]
+
+[project.scripts]
+layout-police = "layout_police.__main__:main"
+layout-police-mcp = "layout_police.mcp_server:main"
+layout-police-web = "layout_police.web:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["layout_police"]
+
+[tool.setuptools.package-data]
+layout_police = ["judge_template.html", "web_template.html"]

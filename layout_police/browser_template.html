@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レイアウト警察</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#dcdcd6; --accent:#4a7bd0; --bad:#c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#1b1b1a; --card:#262624; --ink:#ecece8; --muted:#a3a39c; --line:#3a3a37; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.7 "Hiragino Sans","Meiryo",sans-serif; }
+  header { border-bottom:1px solid var(--line); padding:14px 16px; }
+  header h1 { font-size:19px; margin:0; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  main { max-width:980px; margin:0 auto; padding:16px; }
+  #drop { border:2px dashed var(--line); border-radius:10px; background:var(--card); padding:28px 16px; text-align:center; cursor:pointer; }
+  #drop.over { border-color:var(--accent); }
+  #drop b { display:block; font-size:16px; margin-bottom:4px; }
+  #drop small { color:var(--muted); }
+  #status { margin:14px 0; min-height:1.7em; }
+  #status.err { color:var(--bad); }
+  .summary { font-size:17px; font-weight:700; margin:8px 0 4px; }
+  .legend { font-size:13px; color:var(--muted); margin:0 0 16px; }
+  .legend span { white-space:nowrap; margin-right:12px; }
+  .legend i { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:4px; }
+  h2 { font-size:16px; margin:24px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--line); }
+  details { margin:0 0 12px; }
+  summary { cursor:pointer; color:var(--accent); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:16px; }
+  .head { display:flex; gap:10px; align-items:baseline; }
+  .no { font-weight:700; min-width:2.2em; }
+  .title { flex:1; }
+  .mm { color:var(--muted); font-size:13px; white-space:nowrap; }
+  img { max-width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px; background:#fff; margin-top:8px; }
+  .none { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  .note { color:var(--muted); font-size:13px; margin-top:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>レイアウト警察</h1>
+  <p>スライド・ポスター・文書の「揃えたつもりで、少しだけずれている」ところを、位置の数値で見つけます。直しはしません。</p>
+</header>
+<main>
+  <div id="drop" tabindex="0" role="button" aria-label="PDF を選ぶ">
+    <b>ここに PDF をドラッグ、またはクリックして選ぶ</b>
+    <small>PowerPoint・Word の資料は、「ファイル → エクスポート（名前を付けて保存）→ PDF」で PDF にしてから渡してください</small>
+  </div>
+  <input type="file" id="file" accept=".pdf,application/pdf" hidden>
+  <div id="status" aria-live="polite"></div>
+  <div id="result"></div>
+  <p class="note">資料はこのブラウザの中だけで調べ、どこにも送りません。最初に開いたときだけ、調べるための部品（約30MB）をインターネットから読み込みます。</p>
+</main>
+<script id="py-sources" type="application/json">__PY_SOURCES__</script>
+<script>
+const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
+const drop = document.getElementById("drop"), input = document.getElementById("file");
+const status = document.getElementById("status"), result = document.getElementById("result");
+let busy = false, urls = [];
+
+// 測る処理は別のスレッド（Worker）で動かす。大きな資料でも画面が固まらない
+const workerCode = `
+importScripts("${PYODIDE}pyodide.js");
+let ready = null;
+async function init(sources) {
+  const py = await loadPyodide({ indexURL: "${PYODIDE}" });
+  postMessage({ type: "status", text: "部品を読み込んでいます…" });
+  await py.loadPackage(["numpy", "pillow", "pymupdf"]);
+  py.FS.mkdirTree("/home/pyodide/layout_police");
+  for (const [name, code] of Object.entries(sources)) py.FS.writeFile("/home/pyodide/layout_police/" + name, code);
+  py.runPython(sources["__driver__.py"]);
+  return py;
+}
+onmessage = async (e) => {
+  try {
+    if (e.data.type === "init") { ready = init(e.data.sources); await ready; postMessage({ type: "ready" }); return; }
+    const py = await ready;
+    py.FS.writeFile("/tmp/in.pdf", new Uint8Array(e.data.buf));
+    const progress = (i, n) => postMessage({ type: "status", text: i + " / " + n + " ページを調べています…" });
+    const pages = JSON.parse(py.globals.get("measure")(progress));
+    const transfer = [];
+    for (const p of pages) {
+      if (p.image) { p.image = py.FS.readFile(p.image); transfer.push(p.image.buffer); }
+      for (const f of p.findings) { f.image = py.FS.readFile(f.image); transfer.push(f.image.buffer); }
+    }
+    postMessage({ type: "done", pages }, transfer);
+  } catch (err) {
+    postMessage({ type: "error", text: String(err.message || err).split("\\n").slice(-2).join(" ") });
+  }
+};`;
+const worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: "text/javascript" })));
+const sources = JSON.parse(document.getElementById("py-sources").textContent);
+let loaded = false, pending = null;
+worker.postMessage({ type: "init", sources });
+worker.onerror = (e) => {
+  clearInterval(timer);
+  busy = false;
+  status.className = "err";
+  status.textContent = "準備できませんでした。インターネットにつながっているか確かめて、ページを開き直してください。（" + (e.message || "") + "）";
+};
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === "ready") { loaded = true; if (!busy) status.textContent = ""; return; }
+  if (m.type === "status") { if (busy) status.textContent = `「${pending}」：${m.text}`; return; }
+  clearInterval(timer);
+  busy = false;
+  if (m.type === "error") { status.className = "err"; status.textContent = "調べられませんでした：" + m.text; return; }
+  status.textContent = "";
+  show(pending, m.pages);
+};
+
+let timer = null;
+drop.addEventListener("click", () => !busy && input.click());
+drop.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && !busy) { e.preventDefault(); input.click(); } });
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) send(e.dataTransfer.files[0]); });
+input.addEventListener("change", () => { if (input.files[0]) send(input.files[0]); input.value = ""; });
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function send(file) {
+  if (busy) return;
+  status.className = "";
+  if (!/\.pdf$/i.test(file.name)) {
+    status.className = "err";
+    status.textContent = /\.(pptx?|docx?)$/i.test(file.name)
+      ? "PowerPoint・Word のファイルは、そのままでは調べられません。「ファイル → エクスポート → PDF」で PDF にしてから渡してください。"
+      : "調べられるのは PDF です。";
+    return;
+  }
+  busy = true;
+  pending = file.name;
+  result.innerHTML = "";
+  urls.forEach(URL.revokeObjectURL);
+  urls = [];
+  const t0 = Date.now();
+  status.textContent = loaded ? `「${file.name}」を調べています…` : `「${file.name}」：準備しています（初回は30秒ほどかかります）…`;
+  timer = setInterval(() => {
+    status.textContent = status.textContent.replace(/（\d+ 秒）$/, "") + `（${Math.round((Date.now() - t0) / 1000)} 秒）`;
+  }, 1000);
+  const buf = await file.arrayBuffer();
+  worker.postMessage({ type: "measure", buf }, [buf]);
+}
+
+function img(bytes) {
+  const u = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  urls.push(u);
+  return u;
+}
+
+function show(name, pages) {
+  const total = pages.reduce((s, p) => s + p.findings.length, 0);
+  let html = `<div class="summary">「${esc(name)}」：${total} 件</div>`;
+  if (!total) {
+    result.innerHTML = html + `<div class="none">揃えようとして揃っていないずれは見つかりませんでした。</div>`;
+    return;
+  }
+  html += `<p class="legend"><span><i style="background:#e60000"></i>ずれている端</span><span><i style="background:#005ae6"></i>揃える基準の端</span><span><i style="background:#ff9900"></i>比べたもの</span><span>画像の下は、ずれた端の拡大（数値はずれの大きさ）</span></p>`;
+  const many = pages.length > 1;
+  for (const p of pages) {
+    if (!p.findings.length) continue;
+    html += `<h2>${many ? `${p.page} ページ（${p.findings.length} 件）` : `${p.findings.length} 件`}</h2>`;
+    html += `<details><summary>${many ? "ページ" : ""}全体を見る（番号は下の一覧と同じ）</summary><img src="${img(p.image)}" alt="${p.page} ページ全体"></details>`;
+    p.findings.forEach((f, i) => {
+      html += `<div class="card"><div class="head"><span class="no">${i + 1}.</span><span class="title">${esc(f.title)}</span><span class="mm">${f.size_mm} mm</span></div>`
+            + `<img src="${img(f.image)}" alt="指摘 ${i + 1} の箇所"></div>`;
+    });
+  }
+  result.innerHTML = html;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レイアウト警察</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#dcdcd6; --accent:#4a7bd0; --bad:#c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#1b1b1a; --card:#262624; --ink:#ecece8; --muted:#a3a39c; --line:#3a3a37; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.7 "Hiragino Sans","Meiryo",sans-serif; }
+  header { border-bottom:1px solid var(--line); padding:14px 16px; }
+  header h1 { font-size:19px; margin:0; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  main { max-width:980px; margin:0 auto; padding:16px; }
+  #drop { border:2px dashed var(--line); border-radius:10px; background:var(--card); padding:28px 16px; text-align:center; cursor:pointer; }
+  #drop.over { border-color:var(--accent); }
+  #drop b { display:block; font-size:16px; margin-bottom:4px; }
+  #drop small { color:var(--muted); }
+  #status { margin:14px 0; min-height:1.7em; }
+  #status.err { color:var(--bad); }
+  .summary { font-size:17px; font-weight:700; margin:8px 0 4px; }
+  .legend { font-size:13px; color:var(--muted); margin:0 0 16px; }
+  .legend span { white-space:nowrap; margin-right:12px; }
+  .legend i { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:4px; }
+  h2 { font-size:16px; margin:24px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--line); }
+  details { margin:0 0 12px; }
+  summary { cursor:pointer; color:var(--accent); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:16px; }
+  .head { display:flex; gap:10px; align-items:baseline; }
+  .no { font-weight:700; min-width:2.2em; }
+  .title { flex:1; }
+  .mm { color:var(--muted); font-size:13px; white-space:nowrap; }
+  img { max-width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px; background:#fff; margin-top:8px; }
+  .none { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  .note { color:var(--muted); font-size:13px; margin-top:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>レイアウト警察</h1>
+  <p>スライド・ポスター・文書の「揃えたつもりで、少しだけずれている」ところを、位置の数値で見つけます。直しはしません。</p>
+</header>
+<main>
+  <div id="drop" tabindex="0" role="button" aria-label="ファイルを選ぶ">
+    <b>ここにファイルをドラッグ、またはクリックして選ぶ</b>
+    <small>PDF・PowerPoint（.pptx）・Word（.docx）、__MAX_MB__ MB まで。PowerPoint・Word で書き出した PDF がいちばん正確です</small>
+  </div>
+  <input type="file" id="file" accept=".pdf,.pptx,.docx" hidden>
+  <div id="status" aria-live="polite"></div>
+  <div id="result"></div>
+  <p class="note">アップロードした資料と結果は、このツールを動かしているパソコンの中にだけ置かれ、1日で消えます。外部には送りません。</p>
+</main>
+<script>
+const drop = document.getElementById("drop"), input = document.getElementById("file");
+const status = document.getElementById("status"), result = document.getElementById("result");
+let busy = false;
+
+drop.addEventListener("click", () => !busy && input.click());
+drop.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && !busy) { e.preventDefault(); input.click(); } });
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) send(e.dataTransfer.files[0]); });
+input.addEventListener("change", () => { if (input.files[0]) send(input.files[0]); input.value = ""; });
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function send(file) {
+  if (busy) return;
+  busy = true;
+  result.innerHTML = "";
+  status.className = "";
+  const slow = /\.(pptx|docx)$/i.test(file.name) ? "（PowerPoint・Word で PDF に書き出すので、少し時間がかかります）" : "";
+  const t0 = Date.now();
+  const tick = () => { status.textContent = `「${file.name}」を測っています… ${Math.round((Date.now() - t0) / 1000)} 秒 ${slow}`; };
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const body = new FormData();
+    body.append("file", file);
+    const res = await fetch("check", { method: "POST", body });
+    const data = await res.json().catch(() => ({ error: `測れませんでした（${res.status}）` }));
+    if (!res.ok || data.error) throw new Error(data.error || `測れませんでした（${res.status}）`);
+    status.textContent = "";
+    show(data);
+  } catch (e) {
+    status.className = "err";
+    status.textContent = e.message;
+  } finally {
+    clearInterval(timer);
+    busy = false;
+  }
+}
+
+function show(d) {
+  const base = `jobs/${d.job}/`;
+  let html = `<div class="summary">「${esc(d.name)}」：${d.total} 件</div>`;
+  if (!d.total) {
+    result.innerHTML = html + `<div class="none">揃えようとして揃っていないずれは見つかりませんでした。</div>`;
+    return;
+  }
+  html += `<p class="legend"><span><i style="background:#e60000"></i>ずれている端</span><span><i style="background:#005ae6"></i>揃える基準の端</span><span><i style="background:#ff9900"></i>比べたもの</span><span>画像の下は、ずれた端の拡大</span></p>`;
+  for (const p of d.pages) {
+    if (!p.findings.length) continue;
+    html += `<h2>${d.pages.length > 1 ? `${p.page} ページ（${p.findings.length} 件）` : `${p.findings.length} 件`}</h2>`;
+    html += `<details><summary>${d.pages.length > 1 ? "ページ" : ""}全体を見る（番号は下の一覧と同じ）</summary><img loading="lazy" src="${base}${p.image}" alt="${p.page} ページ全体"></details>`;
+    p.findings.forEach((f, i) => {
+      html += `<div class="card"><div class="head"><span class="no">${i + 1}.</span><span class="title">${esc(f.title)}</span><span class="mm">${f.size_mm} mm</span></div>`
+            + `<img loading="lazy" src="${base}${f.image}" alt="指摘 ${i + 1} の箇所"></div>`;
+    });
+  }
+  result.innerHTML = html;
+}
+</script>
+</body>
+</html>

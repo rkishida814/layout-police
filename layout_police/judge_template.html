@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レイアウト警察 判定</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#dcdcd6;
+          --yes:#c62828; --no:#2e7d32; --hmm:#8d6e00; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#1b1b1a; --card:#262624; --ink:#ecece8; --muted:#a3a39c; --line:#3a3a37; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 "Hiragino Sans","Meiryo",sans-serif; }
+  header { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line); padding:10px 16px; }
+  header h1 { font-size:17px; margin:0 0 4px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:14px; }
+  .count b { font-variant-numeric: tabular-nums; }
+  main { max-width:980px; margin:0 auto; padding:16px; }
+  .help { color:var(--muted); font-size:13px; margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:16px; }
+  .card.done { opacity:.72; }
+  .card:focus-within, .card.cur { outline:2px solid #4a7bd0; outline-offset:2px; }
+  .head { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .no { font-weight:700; }
+  .rule { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:0 5px; }
+  .title { margin:4px 0 8px; }
+  img { max-width:100%; height:auto; display:block; border:1px solid var(--line); border-radius:4px; background:#fff; }
+  .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  button { font:inherit; padding:6px 12px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+  button.sel.yes { background:var(--yes); color:#fff; border-color:var(--yes); }
+  button.sel.no { background:var(--no); color:#fff; border-color:var(--no); }
+  button.sel.hmm { background:var(--hmm); color:#fff; border-color:var(--hmm); }
+  input[type=text], textarea { font:inherit; width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink); margin-top:8px; }
+  textarea { min-height:90px; }
+  .legend { font-size:13px; color:var(--muted); }
+  .legend span { white-space:nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>レイアウト警察 判定：<span id="src"></span></h1>
+  <div class="bar">
+    <span class="count">判定済み <b id="nDone">0</b>/<b id="nAll">0</b>（ずれ <b id="nYes">0</b>・ずれではない <b id="nNo">0</b>・どちらとも <b id="nHmm">0</b>）</span>
+    <label><input type="checkbox" id="onlyTodo"> 未判定だけ表示</label>
+    <button id="save">結果をファイルに保存</button>
+    <button id="copy">結果をコピー</button>
+  </div>
+</header>
+<main>
+  <p class="help">各指摘に「直すべきずれ」「ずれではない」「どちらとも」を付けてください。理由は任意です（例：意図的に離している、グラフの中なので対象外）。
+  ボタンを押しても次へは移りません。理由を書いてから、スクロールか <b>J/K</b>（次・前）で進んでください。キーボードの <b>1/2/3</b> でも選べます。判定はこのブラウザに自動で保存されます。終わったら「結果をファイルに保存」で JSON を保存してください。<br>
+  <span class="legend"><span>赤い線＝ずれている端</span>・<span>青い線＝基準にした端</span>・<span>橙の枠＝比べた要素</span></span></p>
+  <div id="list"></div>
+  <div class="card">
+    <div class="no">見落とし</div>
+    <div class="title">ツールが指摘しなかったが、直すべきずれがあれば書いてください（場所と内容）。</div>
+    <textarea id="missed"></textarea>
+  </div>
+</main>
+<script>
+const SOURCE = __SOURCE__;
+const VERSION = __VERSION__;
+const ITEMS = __ITEMS__;
+const LABEL = { yes: "直すべきずれ", no: "ずれではない", hmm: "どちらとも" };
+const KEY = "layout-police-judge:" + SOURCE + ":" + VERSION;
+let state = { v: {}, note: {}, missed: "" };
+// 以前の判定がある指摘は、その判定を入れておく
+ITEMS.forEach(it => { if (it.prev) { state.v[it.id] = it.prev; state.note[it.id] = it.prev_note || ""; } });
+try { const s = JSON.parse(localStorage.getItem(KEY) || "null"); if (s) state = Object.assign(state, s); } catch (e) {}
+const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} };
+document.getElementById("src").textContent = SOURCE;
+const list = document.getElementById("list");
+let cur = 0;
+
+ITEMS.forEach((it, i) => {
+  const c = document.createElement("div");
+  c.className = "card"; c.dataset.i = i; c.id = "c" + i;
+  c.innerHTML = `<div class="head"><span class="no">${it.page}ページ #${it.no}</span><span class="rule">${it.rule}</span><span class="legend">${it.delta_mm} mm</span>${it.prev ? `<span class="rule">前回の判定：${LABEL[it.prev]}</span>` : `<span class="rule" style="color:var(--yes)">新しい指摘</span>`}</div>
+    <div class="title"></div><img loading="lazy" alt="">
+    <div class="btns">${Object.entries(LABEL).map(([k, l]) => `<button data-k="${k}" class="${k}">${l}</button>`).join("")}</div>
+    <input type="text" placeholder="理由（任意）">`;
+  c.querySelector(".title").textContent = it.title;
+  c.querySelector("img").src = it.img;
+  c.querySelectorAll("button").forEach(b => b.onclick = () => { setV(i, b.dataset.k); });
+  const inp = c.querySelector("input");
+  inp.value = state.note[it.id] || "";
+  inp.oninput = () => { state.note[it.id] = inp.value; persist(); };
+  c.addEventListener("click", () => setCur(i, false));
+  list.appendChild(c);
+});
+const missed = document.getElementById("missed");
+missed.value = state.missed || "";
+missed.oninput = () => { state.missed = missed.value; persist(); };
+
+function setV(i, k) {
+  const id = ITEMS[i].id;
+  state.v[id] = state.v[id] === k ? undefined : k;
+  persist(); render(false);  // 押しても移動も非表示もしない（理由を書けるように）
+}
+function setCur(i, scroll) {
+  cur = i;
+  document.querySelectorAll(".card.cur").forEach(c => c.classList.remove("cur"));
+  const c = document.getElementById("c" + i); if (!c) return;
+  c.classList.add("cur");
+  if (scroll) c.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+function render(filter = true) {
+  const only = document.getElementById("onlyTodo").checked;
+  let n = { yes: 0, no: 0, hmm: 0 };
+  ITEMS.forEach((it, i) => {
+    const v = state.v[it.id], c = document.getElementById("c" + i);
+    if (v) n[v]++;
+    c.classList.toggle("done", !!v);
+    if (filter) c.style.display = only && v ? "none" : "";
+    c.querySelectorAll("button").forEach(b => b.classList.toggle("sel", b.dataset.k === v));
+  });
+  nAll.textContent = ITEMS.length; nYes.textContent = n.yes; nNo.textContent = n.no; nHmm.textContent = n.hmm;
+  nDone.textContent = n.yes + n.no + n.hmm;
+}
+function result() {
+  return JSON.stringify({ source: SOURCE, judged_at: new Date().toISOString(),
+    items: ITEMS.map(it => ({ id: it.id, page: it.page, rule: it.rule, title: it.title, delta_mm: it.delta_mm, boxes: it.boxes,
+      verdict: state.v[it.id] || null, note: state.note[it.id] || "" })),
+    missed: state.missed || "" }, null, 1);
+}
+document.getElementById("onlyTodo").onchange = render;
+if (ITEMS.some(it => it.prev)) document.getElementById("onlyTodo").checked = true;
+document.getElementById("save").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([result()], { type: "application/json" }));
+  a.download = "judgments.json"; a.click();
+};
+document.getElementById("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText(result()); alert("コピーしました"); }
+  catch (e) { prompt("コピーしてください", result()); }
+};
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, textarea")) return;
+  if (e.key === "1") setV(cur, "yes");
+  else if (e.key === "2") setV(cur, "no");
+  else if (e.key === "3") setV(cur, "hmm");
+  else if (e.key === "j" || e.key === "J") setCur(Math.min(cur + 1, ITEMS.length - 1), true);
+  else if (e.key === "k" || e.key === "K") setCur(Math.max(cur - 1, 0), true);
+});
+render(); setCur(0, false);
+</script>
+</body>
+</html>
