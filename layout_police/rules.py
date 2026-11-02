@@ -211,6 +211,11 @@ def check(pg, els):
         for im in imgs:
             if im.sec != t.sec or not (im.x0 <= t.cx <= im.x1):
                 continue
+            # 画像を貼った範囲に食い込み、同じ高さに別の文字も並ぶもの（0Ag 0.01Ag …）は、グラフの目盛りで、キャプションではない
+            px0, py0, px1, py1 = getattr(im, "placed", im.box())
+            inside = lambda o: px0 <= o.cx <= px1 and min(o.y1, py1) - max(o.y0, py0) >= 0.3 * o.h
+            if inside(t) and sum(1 for o in texts if abs(o.cy - t.cy) < 0.5 * t.size and inside(o)) >= 2:
+                continue
             below, above = t.y0 - im.y1, im.y0 - t.y1
             if -0.3 * t.size <= below <= 1.2 * t.size:
                 cands.append((below, im, "below"))
@@ -240,6 +245,8 @@ def check(pg, els):
                for t in els if t.kind == "text" for l in t.lines):
             continue
         if a.dir in ("down", "up"):
+            if getattr(a, "round", False):  # 丸は下の文字を指さない（模式図の粒など）
+                continue
             if a.dir == "down":
                 cs = [t for t in texts if t.y0 >= a.y0 and t.y0 - a.y1 <= 2 * t.size and t.x0 <= a.cx <= t.x1]
                 tgt = min(cs, key=lambda t: t.y0, default=None)
@@ -434,6 +441,11 @@ def check(pg, els):
         if any(e.sec == si and e.kind != "bar" and e.col is not None and e.col + 1 < len(cols)
                and e.x1 > cols[e.col + 1][2] + 30 * u for e in els):
             continue
+        # 段の間の空白を斜めの線・曲線（流れ図の区切り、吹き出しの点線など）が横切る区画は、段ではなく図
+        sy0, sy1 = pg.sections[si]
+        if any(s0 < x - u and x + u < s1 and t0 < sy1 and t1 > sy0
+               for s0, t0, s1, t1 in _strokes(pg) for _, _, x in cols[1:]):
+            continue
         bottoms = []
         for ci in range(len(cols)):
             mine = [e for e in els if e.sec == si and e.col == ci and e.kind != "bar"]
@@ -447,6 +459,21 @@ def check(pg, els):
 
     F.sort(key=Finding.sort_key)
     return F
+
+
+def _strokes(pg):
+    """線で描いた斜めの線・曲線の範囲（高さ 20u 以上）。枠や水平・垂直の線は含めない。"""
+    if not hasattr(pg, "strokes"):
+        pg.strokes = []
+        for dr in pg.page.get_drawings():
+            r = dr["rect"]
+            if "s" not in (dr.get("type") or "") or r.height < 20 * pg.u:
+                continue
+            slanted = any(it[0] == "l" and abs(it[1].x - it[2].x) > pg.u and abs(it[1].y - it[2].y) > pg.u
+                          for it in dr["items"])
+            if slanted or any(it[0] == "c" for it in dr["items"]):
+                pg.strokes.append((r.x0, r.y0, r.x1, r.y1))
+    return pg.strokes
 
 
 class _Edge:

@@ -3,6 +3,7 @@
 座標はすべて PDF の pt（左上原点）。u はページ幅の 1/1000 で、しきい値の単位に使う。
 """
 import math
+from collections import Counter
 
 import numpy as np
 import pymupdf
@@ -109,6 +110,7 @@ def _raw_lines(pg, boxes):
                 size=max(s["size"] for _, s in vis),
                 text=_tidy("".join(c["c"] for c, _ in chars)),
                 color=vis[0][1]["color"],
+                block=b["number"],
                 wide_start=_is_wide(first["c"]),
                 body_x0=body["bbox"][0] if body else None))
     # 同じ行が別々のテキストボックスに分かれているもの（見出しの継ぎ足しなど）をつなぐ
@@ -167,8 +169,10 @@ def _paragraphs(lines, boxes):
         for p in paras:
             q = p[-1]
             gap = l["y0"] - q["y1"]
+            # 同じテキストボックス（PDF の文字ブロック）の行は、行間を詰めて重なっていても続きとみなす
+            lo = -0.6 if l["block"] == q["block"] else -0.35
             if (abs(l["size"] - q["size"]) < 0.6 and l["color"] == q["color"] and l["cont"] == q["cont"]
-                    and -0.35 * q["size"] <= gap <= 0.3 * q["size"]
+                    and lo * q["size"] <= gap <= 0.3 * q["size"]
                     and min(l["x1"], q["x1"]) - max(l["x0"], q["x0"]) > 0):
                 best = p
         if best is None:
@@ -236,13 +240,18 @@ def _images(pg, doc):
         ang = math.degrees(math.atan2(t[1], t[0])) % 90
         kind = "image" if min(ang, 90 - ang) < 2 else "part"
         # 背景を透明にした切り抜きのイラスト・矢印の絵は、写真や図のように端を揃える対象ではない
-        out.append(El(kind, vis, f"画像@({vis[0]:.0f},{vis[1]:.0f})", fill=pg.fill_ratio(vis), cutout=clear >= 0.4))
+        out.append(El(kind, vis, f"画像@({vis[0]:.0f},{vis[1]:.0f})", fill=pg.fill_ratio(vis), cutout=clear >= 0.4,
+                      placed=tuple(r)))
     return out
 
 
 def _drawings(pg):
     out, u = [], pg.u
-    for dr in pg.page.get_drawings():
+    drawings = pg.page.get_drawings()
+    # 同じ形・大きさの小さな図形（10u 未満）がたくさんあるもの（粉末の粒などの模様）は、矢印ではない
+    shape = lambda dr: (tuple(it[0] for it in dr["items"]), round(dr["rect"].width), round(dr["rect"].height))
+    count = Counter(shape(dr) for dr in drawings)
+    for dr in drawings:
         r = dr["rect"]
         kinds = [it[0] for it in dr["items"]]
         typ = dr.get("type") or ""
@@ -259,14 +268,16 @@ def _drawings(pg):
             elif dr.get("fill") and min(dr["fill"]) < 0.97:
                 out.append(El("panel", tuple(r), f"塗り@({r.x0:.0f},{r.y0:.0f})", inner=tuple(r)))
         elif ("f" in typ and set(kinds) <= {"l", "c"} and 3 <= len(kinds) <= 12
-              and 2 * u < max(r.width, r.height) < 40 * u):
+              and 2 * u < max(r.width, r.height) < 40 * u
+              and (count[shape(dr)] < 10 or max(r.width, r.height) >= 10 * u)):
             pts = [p for it in dr["items"] for p in it[1:] if isinstance(p, pymupdf.Point)]
             my, mx = sum(p.y for p in pts) / len(pts), sum(p.x for p in pts) / len(pts)
             if r.width >= r.height:
                 d = "down" if my < (r.y0 + r.y1) / 2 else "up"
             else:
                 d = "right" if mx < (r.x0 + r.x1) / 2 else "left"
-            out.append(El("arrow", tuple(r), f"矢印@({r.x0:.0f},{r.y0:.0f})", dir=d))
+            # 曲線だけの図形（円・楕円）は尖った先が無く、向きを持たない
+            out.append(El("arrow", tuple(r), f"矢印@({r.x0:.0f},{r.y0:.0f})", dir=d, round="l" not in kinds))
     return out
 
 
