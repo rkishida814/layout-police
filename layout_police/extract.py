@@ -53,15 +53,11 @@ class Page:
         sub = self.img[y0:y1, x0:x1]
         if sub.size == 0:
             return None
-        m = sub.min(axis=2) < thr
-        # 細い罫線や点のゴミは見た目の端にしない：列（行）の 3% 以上が白でないところを中身とする
-        cols = np.nonzero(m.sum(axis=0) >= max(2, 0.03 * m.shape[0]))[0]
-        rows = np.nonzero(m.sum(axis=1) >= max(2, 0.03 * m.shape[1]))[0]
-        if len(cols) == 0 or len(rows) == 0:
+        ext = _ink_extent(sub.min(axis=2) < thr)
+        if ext is None:
             return None
         z = self.z
-        return ((x0 + cols.min()) / z, (y0 + rows.min()) / z,
-                (x0 + cols.max() + 1) / z, (y0 + rows.max() + 1) / z)
+        return ((x0 + ext[0]) / z, (y0 + ext[1]) / z, (x0 + ext[2]) / z, (y0 + ext[3]) / z)
 
     def fill_ratio(self, r, thr=235):
         """r の範囲のうち、白でない画素の割合。写真は 1 に近く、斜めの棒などの絵は小さい。"""
@@ -194,7 +190,7 @@ def _content_frac(doc, xref, thr=235):
         if pm.alpha:
             pm = pymupdf.Pixmap(pm, 0)
     except Exception:
-        return (0, 0, 1, 1), 0.0
+        return (0, 0, 1, 1), 0.0, None
     a = np.frombuffer(pm.samples, np.uint8).reshape(pm.h, pm.w, 3)
     m = a.min(axis=2) < thr
     clear = 0.0
@@ -205,11 +201,37 @@ def _content_frac(doc, xref, thr=235):
             al = np.frombuffer(sm.samples, np.uint8).reshape(sm.h, sm.w, sm.n)[..., 0]
             m = m & (al > 30)
             clear = float((al <= 30).mean())
-    cols = np.nonzero(m.sum(axis=0) >= max(2, 0.03 * pm.h))[0]
-    rows = np.nonzero(m.sum(axis=1) >= max(2, 0.03 * pm.w))[0]
+    ext = _ink_extent(m)
+    if ext is None:
+        return None, clear, None
+    axis = _axis_row(m)
+    return ((ext[0] / pm.w, ext[1] / pm.h, ext[2] / pm.w, ext[3] / pm.h), clear,
+            None if axis is None else axis / pm.h)
+
+
+def _axis_row(m):
+    """グラフの横軸：画像の下半分で、幅の 3 割以上に続く細い横線のうち、いちばん下のものの中心の行。
+    写真のように上下の行もずっと色が続くものは線ではない。"""
+    h, w = m.shape
+    hl = np.nonzero(m.sum(axis=1) >= 0.3 * w)[0]
+    runs = np.split(hl, np.nonzero(np.diff(hl) > 1)[0] + 1) if len(hl) else []
+    for r in reversed(runs):
+        if r[0] < 0.5 * h:
+            break
+        if len(r) <= max(3, 0.02 * h):
+            return (r[0] + r[-1] + 1) / 2
+    return None
+
+
+def _ink_extent(m):
+    """白でない画素 m の範囲（画素で x0, y0, x1, y1）。
+    細い罫線や点のゴミは見た目の端にしない：列（行）の 3% 以上が白でないところを中身とする。"""
+    h, w = m.shape
+    cols = np.nonzero(m.sum(axis=0) >= max(2, 0.03 * h))[0]
+    rows = np.nonzero(m.sum(axis=1) >= max(2, 0.03 * w))[0]
     if len(cols) == 0 or len(rows) == 0:
-        return None, clear
-    return (cols.min() / pm.w, rows.min() / pm.h, (cols.max() + 1) / pm.w, (rows.max() + 1) / pm.h), clear
+        return None
+    return cols.min(), rows.min(), cols.max() + 1, rows.max() + 1
 
 
 def _images(pg, doc):
@@ -220,10 +242,10 @@ def _images(pg, doc):
             continue
         vis = tuple(r)
         xref, t = info.get("xref", 0), info["transform"]
-        clear = 0.0
+        clear, axis = 0.0, None
         if xref and abs(t[1]) < 1e-6 and abs(t[2]) < 1e-6:
             # 画像そのものの画素で中身の範囲を測る（重なった枠や文字を画像の端と取り違えない）
-            frac, clear = _content_frac(doc, xref)
+            frac, clear, ax = _content_frac(doc, xref)
             if frac is None:
                 continue  # 透明または真っ白な画像
             fx, fy = np.array(frac[0::2]), np.array(frac[1::2])
@@ -231,6 +253,8 @@ def _images(pg, doc):
             vis = (max(r.x0, X.min()), max(r.y0, Y.min()), min(r.x1, X.max()), min(r.y1, Y.max()))
             if vis[0] >= vis[2] or vis[1] >= vis[3]:
                 continue
+            if ax is not None and r.y0 <= t[5] + ax * t[3] <= r.y1:
+                axis = t[5] + ax * t[3]
         trimmed = pg.trim_white(vis)
         if trimmed is None:
             continue
@@ -241,7 +265,7 @@ def _images(pg, doc):
         kind = "image" if min(ang, 90 - ang) < 2 else "part"
         # 背景を透明にした切り抜きのイラスト・矢印の絵は、写真や図のように端を揃える対象ではない
         out.append(El(kind, vis, f"画像@({vis[0]:.0f},{vis[1]:.0f})", fill=pg.fill_ratio(vis), cutout=clear >= 0.4,
-                      placed=tuple(r)))
+                      placed=tuple(r), axis=axis))
     return out
 
 

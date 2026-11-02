@@ -351,6 +351,9 @@ def check(pg, els):
         if a.kind == "text" or b.kind == "text":
             return (a.kind == b.kind == "text" and not a.minor and not b.minor and abs(a.size - b.size) < 0.6
                     and a.align in ("single", "left") and b.align in ("single", "left"))
+        # 横軸のあるグラフどうしは、上端・下端（棒や誤差棒で決まる）ではなく横軸で比べる
+        if getattr(a, "axis", None) is not None and getattr(b, "axis", None) is not None:
+            return False
         # 大きさの違うもの（写真と矢印の図など）の上端・下端を揃える意味はない
         return a.kind == b.kind and min(a.h, b.h) >= 0.75 * max(a.h, b.h)
     row_items = [e for e in els if e.kind in ("image", "frame", "panel", "text") and not getattr(e, "band_title", False)
@@ -362,6 +365,20 @@ def check(pg, els):
             marks = [("h", v, e.x0, e.x1, "ref" if s is ref else "bad") for s in subs for e, v in s]
             F.append(Finding("R2", f"横に並んだ要素の{side}がわずかにずれている（{mm(max(vals) - min(vals))}）："
                              + "、".join(_name(e) for e, _ in comp), max(vals) - min(vals), marks, [e for e, _ in comp]))
+
+    # R2 横に並んだグラフの横軸の高さ
+    def graphmates(a, b):
+        ov = min(a.y1, b.y1) - max(a.y0, b.y0)
+        pa, pb = getattr(a, "placed", a.box()), getattr(b, "placed", b.box())
+        hgap = max(pa[0], pb[0]) - min(pa[2], pb[2])
+        return a.sec == b.sec and ov >= 0.5 * min(a.h, b.h) and hgap <= 40 * u
+    axes = [(e, e.axis) for e in photos if getattr(e, "axis", None) is not None]
+    for comp, subs, ref in _edge_groups(axes, graphmates, NEAR, 1.5 * u):
+        vals = [v for _, v in comp]
+        # 中身の端は棒の部分だけのことがあるので、線は画像を貼った幅いっぱいに描く
+        marks = [("h", v, e.placed[0], e.placed[2], "ref" if s is ref else "bad") for s in subs for e, v in s]
+        F.append(Finding("R2", f"横に並んだグラフの横軸の高さがわずかにずれている（{mm(max(vals) - min(vals))}）："
+                         + "、".join(_name(e) for e, _ in comp), max(vals) - min(vals), marks, [e for e, _ in comp]))
 
     # R2 段落の中の行頭（字下げ）が階段状になっていないか
     for t in texts:
@@ -391,6 +408,24 @@ def check(pg, els):
                     what = "箇条書きの点の位置" if kind == "点" else "行頭"
                     F.append(Finding("R2i", f"段落{_name(t)}の{what}がわずかにずれている（{len(g)} 行、{mm(max(v) - min(v))}）",
                                      max(v) - min(v), [("v", x, l["y0"], l["y1"], "bad") for x, l in g], [t]))
+
+    # R2i 箇条書きの折り返した行が、点の後ろの文字ではなく、点の位置（またはその左）から始まっている
+    for t in texts:
+        if t.align in ("center", "right"):
+            continue
+        body = None
+        for l in t.lines:
+            if l.get("body_x0") is not None:
+                body = l
+                continue
+            if body is None:
+                continue
+            d = body["body_x0"] - l["x0"]
+            if d >= min(NEAR, 0.3 * t.size) and l["x0"] <= body["x0"] + 0.3 * t.size:
+                F.append(Finding("R2i", f"段落{_name(t)}の箇条書きの折り返した行が、点の後ろの文字の位置に揃っていない（{mm(d)}）",
+                                 d, [("v", body["body_x0"], body["y0"], body["y1"], "ref"),
+                                     ("v", l["x0"], l["y0"], l["y1"], "bad")], [t]))
+            body = None  # 1つの点につき1回だけ指摘する
 
     # R5 繰り返す部品の一貫性：見出しの記号と文字の間隔、並んだ画像の大きさ
     gaps = [(m, h, h.lines[0]["x0"] - m.x1) for m, h in pg.marker_pairs]
